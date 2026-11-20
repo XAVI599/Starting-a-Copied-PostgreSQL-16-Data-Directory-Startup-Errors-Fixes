@@ -1,0 +1,85 @@
+# Starting a Copied PostgreSQL 16 Data Directory: Startup Errors & Fixes
+
+A hands-on log of what happened when I copied a PostgreSQL 16 data directory over to another Ubuntu machine and tried to start the server with `pg_ctl`.
+
+Copying a data directory (`PGDATA`) moves database files and configuration references—not OS packages, system locales, shared PostgreSQL files, SSL certificates, or temporary `/var/run` directories. Running `pg_ctl` directly surfaces these checks one by one.
+
+---
+
+## 1. Missing `conf.d` Directory & Empty `include_dir`
+
+Error
+```text
+LOG:  could not open configuration directory "/etc/postgresql/16/main/conf.d": No such file or directory
+FATAL:  configuration file "/etc/postgresql/16/main/postgresql.conf" contains errors
+
+And inspecting line 812 of postgresql.conf showed an empty value after =:
+
+include_dir =
+
+reason: 
+
+postgresql.conf included an include_dir setting without a valid directory path (or pointing to conf.d which didn't exist). PostgreSQL treats a missing include_dir target or malformed directive as a startup error.
+
+Fix: 
+
+Either set a valid directory and create it (or comment out include_dir if unused): {i commented the line --> #include_dir = 'conf.d'}
+
+Error:
+
+LOG:  invalid value for parameter "lc_messages": "en_US.UTF-8"
+LOG:  invalid value for parameter "lc_monetary": "en_US.UTF-8"
+LOG:  invalid value for parameter "lc_numeric": "en_US.UTF-8"
+LOG:  invalid value for parameter "lc_time": "en_US.UTF-8"
+FATAL:  configuration file "/etc/postgresql/16/main/postgresql.conf" contains errors
+
+locale -a only listed C, C.utf8, and POSIX, and /etc/locale.gen didn't exist until the locales package was installed.
+
+Fix:
+
+sudo apt-get update && sudo apt-get install -y locales
+sudo sed -i 's/^# *en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+sudo locale-gen
+
+Error:
+
+FATAL:  could not open directory "/usr/share/postgresql/16/timezonesets": No such file or directory
+HINT:  This may indicate an incomplete PostgreSQL installation, or that the file "/usr/lib/postgresql/16/bin/postgres" has been moved away from its proper location.
+
+Fix:
+
+copied the directory from the primary using scp -r 
+
+Error:
+
+FATAL:  could not load server certificate file "/etc/ssl/certs/ssl-cert-snakeoil.pem": No such file or directory
+LOG:  database system is shut down
+
+Fix:
+
+sudo apt-get update && sudo apt-get install -y ssl-cert
+ls -l /etc/ssl/certs/ssl-cert-snakeoil.pem
+
+Error:
+
+FATAL:  could not access private key file "/etc/ssl/private/ssl-cert-snakeoil.key": Permission denied
+LOG:  database system is shut down
+
+Fix:
+
+sudo usermod -aG ssl-cert postgres
+
+Error:
+
+LOG:  starting PostgreSQL 16.x ...
+LOG:  listening on IPv4 address "0.0.0.0", port 5432
+LOG:  listening on IPv6 address "::", port 5432
+FATAL:  could not create lock file "/var/run/postgresql/.s.PGSQL.5432.lock": No such file or directory
+LOG:  database system is shut down
+
+Fix:
+
+Create the dir and dix the permissions
+
+
+
