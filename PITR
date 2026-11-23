@@ -49,5 +49,40 @@ All activities on this system are monitored and logged.
 2026-11-23 07:47:26.607 IST [30678] LOG:  consistent recovery state reached at 2/CF000138
 2026-11-23 07:47:26.608 IST [30675] LOG:  database system is ready to accept read-only connections
 2026-11-23 07:47:26.640 IST [30678] LOG:  recovery stopping before commit of transaction 8178, time 2026-11-23 07:40:39.945957+05:30
+
+
+postgres=# select pg_is_
+
+postgres=# \df pg_is
+pg_is_in_recovery                     pg_is_other_temp_schema               pg_is_wal_replay_paused               pg_isolation_test_session_is_blocked
+postgres=# select pg_is_in_recovery
+postgres-# ();
+ pg_is_in_recovery 
+-------------------
+ t
+(1 row)
+
+postgres=# select pg_is_wal_replay_paused();
+ pg_is_wal_replay_paused 
+-------------------------
+ t
+(1 row)
+
+postgres=# select pg_wal_replay_resume();
+ pg_wal_replay_resume 
+----------------------
+ 
+(1 row)
+
+postgres=# select pg_is_wal_replay_paused();
+ERROR:  recovery is not in progress
+HINT:  Recovery control functions can only be executed during recovery.
+postgres=# select pg_is_in_recovery
+();
+ pg_is_in_recovery 
+-------------------
+ f
+(1 row)
+
 2026-11-23 07:47:26.640 IST [30678] LOG:  pausing at the end of recovery
 2026-11-23 07:47:26.640 IST [30678] HINT:  Execute pg_wal_replay_resume() to promote.
