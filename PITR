@@ -1,0 +1,53 @@
+standbyuser@standby:~$ sudo -u postgres env LD_PRELOAD=/usr/local/lib/sslkeylog.so SSLKEYLOGFILE=/var/tmp/keys/keys.log /usr/lib/postgresql/16/bin/pg_ctl -D /var/lib/postgresql/16/main -l /var/log/postgresql/standby.log -o '-c unix_socket_directories=/tmp -c config_file=/etc/postgresql/16/main/postgresql.conf' restart
+pg_ctl: PID file "/var/lib/postgresql/16/main/postmaster.pid" does not exist
+Is server running?
+trying to start server anyway
+waiting for server to start........... done
+server started
+standbyuser@standby:~$ sudo ss -tnlp
+State           Recv-Q          Send-Q                   Local Address:Port                   Peer Address:Port         Process                                                         
+LISTEN          0               4096                        127.0.0.54:53                          0.0.0.0:*             users:(("systemd-resolve",pid=575,fd=17))                      
+LISTEN          0               200                            0.0.0.0:5432                        0.0.0.0:*             users:(("postgres",pid=30675,fd=6))                            
+LISTEN          0               4096                           0.0.0.0:22                          0.0.0.0:*             users:(("sshd",pid=794,fd=3),("systemd",pid=1,fd=65))          
+LISTEN          0               4096                     127.0.0.53%lo:53                          0.0.0.0:*             users:(("systemd-resolve",pid=575,fd=15))                      
+LISTEN          0               200                               [::]:5432                           [::]:*             users:(("postgres",pid=30675,fd=7))                            
+LISTEN          0               4096                              [::]:22                             [::]:*             users:(("sshd",pid=794,fd=4),("systemd",pid=1,fd=66))          
+standbyuser@standby:~$ sudo -u postgres cat /var/log/postgresql/standby.log 
+2026-11-23 07:47:18.328 IST [30675] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-11-23 07:47:18.328 IST [30675] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-11-23 07:47:18.328 IST [30675] LOG:  listening on IPv6 address "::", port 5432
+2026-11-23 07:47:18.348 IST [30675] LOG:  listening on Unix socket "/tmp/.s.PGSQL.5432"
+postgres: could not write external PID file "/var/run/postgresql/16-main.pid": No such file or directory
+2026-11-23 07:47:18.371 IST [30678] LOG:  database system was interrupted; last known up at 2026-11-23 07:33:59 IST
+
+This system is restricted to authorized personnel only.
+Unauthorized access or use is strictly prohibited and may result in disciplinary action or legal consequences.
+All activities on this system are monitored and logged.
+
+
+rsync: [sender] link_stat "/var/postgres/backups/00000002.history.gz" failed: No such file or directory (2)
+rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1887) [Receiver=3.2.7]
+rsync: [Receiver] write error: Broken pipe (32)
+2026-11-23 07:47:24.258 IST [30678] LOG:  entering standby mode
+2026-11-23 07:47:24.259 IST [30678] LOG:  starting backup recovery with redo LSN 2/CF000028, checkpoint LSN 2/CF000060, on timeline ID 1
+
+This system is restricted to authorized personnel only.
+Unauthorized access or use is strictly prohibited and may result in disciplinary action or legal consequences.
+All activities on this system are monitored and logged.
+
+
+2026-11-23 07:47:25.453 IST [30678] LOG:  restored log file "0000000100000002000000CF" from archive
+2026-11-23 07:47:25.574 IST [30678] LOG:  redo starts at 2/CF000028
+
+This system is restricted to authorized personnel only.
+Unauthorized access or use is strictly prohibited and may result in disciplinary action or legal consequences.
+All activities on this system are monitored and logged.
+
+
+2026-11-23 07:47:26.515 IST [30678] LOG:  restored log file "0000000100000002000000D0" from archive
+2026-11-23 07:47:26.607 IST [30678] LOG:  completed backup recovery with redo LSN 2/CF000028 and end LSN 2/CF000138
+2026-11-23 07:47:26.607 IST [30678] LOG:  consistent recovery state reached at 2/CF000138
+2026-11-23 07:47:26.608 IST [30675] LOG:  database system is ready to accept read-only connections
+2026-11-23 07:47:26.640 IST [30678] LOG:  recovery stopping before commit of transaction 8178, time 2026-11-23 07:40:39.945957+05:30
+2026-11-23 07:47:26.640 IST [30678] LOG:  pausing at the end of recovery
+2026-11-23 07:47:26.640 IST [30678] HINT:  Execute pg_wal_replay_resume() to promote.
