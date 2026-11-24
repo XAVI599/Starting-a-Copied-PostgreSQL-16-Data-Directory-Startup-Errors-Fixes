@@ -1,0 +1,11 @@
+hpuser@hpuser-HP-Laptop-15-bs0xx:~$ ps -ef --forest | grep [p]ostgres
+postgres    1473       1  0 07:04 ?        00:00:00 /usr/lib/postgresql/16/bin/postgres -D /var/lib/postgresql/16/main -c config_file=/etc/postgresql/16/main/postgresql.conf
+postgres    1507    1473  0 07:04 ?        00:00:00  \_ postgres: 16/main: checkpointer 
+postgres    1508    1473  0 07:04 ?        00:00:00  \_ postgres: 16/main: background writer 
+postgres    1722    1473  0 07:04 ?        00:00:00  \_ postgres: 16/main: walwriter 
+postgres    1723    1473  0 07:04 ?        00:00:00  \_ postgres: 16/main: autovacuum launcher 
+postgres    1724    1473  0 07:04 ?        00:00:00  \_ postgres: 16/main: archiver last was 0000000100000002000000D4.00000028.backup
+postgres    1725    1473  0 07:04 ?        00:00:00  \_ postgres: 16/main: logical replication launcher 
+postgres   15332    1473  0 14:27 ?        00:00:00  \_ postgres: 16/main: walsender postgres 192.168.1.177(38744) streaming 2/D5000148
+postgres   15333    1473  0 14:27 ?        00:00:00  \_ postgres: 16/main: walsender postgres 192.168.1.178(39444) streaming 2/D5000148
+postgres   16002    1473  0 15:07 ?        00:00:00  \_ postgres: 16/main: walsender postgres 192.168.1.179(43788) streaming 2/D5000148
