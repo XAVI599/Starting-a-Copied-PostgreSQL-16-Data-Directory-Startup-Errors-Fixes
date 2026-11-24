@@ -20,8 +20,6 @@ postgres   16002    1473  0 15:07 ?        00:00:00  \_ postgres: 16/main: walse
  16258 |       10 | postgres | node179          | 192.168.1.179 |                 |       37462 | 2026-11-24 15:30:00.377036+05:30 |              | streaming | 2/D5000148 | 2/D5000148 | 2/D5000148 | 2/D5000148 |           |           |            |             0 | async      | 2026-11-24 15:32:21.212601+05:30
 (3 rows)
 
-~
-~
 
 standbyuser@standby:~$ sudo -i -u postgres  psql -h /tmp
 [sudo] password for standbyuser: 
