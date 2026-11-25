@@ -1,0 +1,192 @@
+# PostgreSQL SCRAM-SHA-256: the 4 authentication packets
+
+Captured: `psql` to PostgreSQL 16, SCRAM-SHA-256-PLUS over TLS (Wireshark).
+
+## Field legend
+
+| Field | Meaning |
+|---|---|
+| `p=tls-server-end-point,,` | GS2 header (channel binding requested). Only in packet 1 |
+| `n=` | username (empty; PostgreSQL uses the startup packet user) |
+| `r=` | nonce (client nonce, then client nonce + server nonce) |
+| `s=` | salt, base64 |
+| `i=` | PBKDF2 iteration count |
+| `c=` | channel binding, base64 = `p=tls-server-end-point,,` (24 B) + SHA-256 of server certificate (32 B). `biws` (= `n,,`) when no channel binding |
+| `p=` | ClientProof, base64, 32 B |
+| `v=` | ServerSignature, base64, 32 B |
+
+## Packet sequence
+
+| # | Frame | Direction | Message |
+|---|---|---|---|
+| 1 | 26 | client -> server | `p=tls-server-end-point,,n=,r=W9IrGgf7LpsssNerOGIcRDsi` |
+| 2 | 27 | server -> client | `r=W9IrGgf7LpsssNerOGIcRDsiydppEs2LhXHu8Sr8JdXg9NOy,s=fClpg1M4eimzY/nhx7yXwA==,i=4096` |
+| 3 | 28 | client -> server | `c=cD10bHMtc2VydmVyLWVuZC1wb2ludCwsoOrQ7hsneQb55KEH9ESx9N9shQ9GArcNRhgZbGJjvBk=,r=W9IrGgf7LpsssNerOGIcRDsiydppEs2LhXHu8Sr8JdXg9NOy,p=YTVtTIH+nOxhSAvKouKvpnOVTfop5Pl7KYw4CLnnlHg=` |
+| 4 | 29 (first `R`) | server -> client | `v=EZPTqUbeJP2JjL6ZBedZuNdAWzuji6vfKYip00YBNPA=` |
+
+Frame 25: server offers mechanisms. Frame 29 (`<R/R/S x14/K/Z`) also carries AuthenticationOk, 14 ParameterStatus, BackendKeyData, ReadyForQuery.
+
+---
+
+## Packet 1: client-first
+
+```
+p=tls-server-end-point,,n=,r=<client nonce>
+```
+
+---
+
+## Formulas (before packet 2)
+
+Stored on the server at password-set time (`pg_authid.rolpassword`):
+
+```
+SCRAM-SHA-256$<i>:<salt>$<StoredKey>:<ServerKey>
+```
+
+```
+SaltedPassword  = PBKDF2-HMAC-SHA256(password, salt, i)
+ClientKey       = HMAC-SHA256(SaltedPassword, "Client Key")
+StoredKey       = SHA256(ClientKey)
+ServerKey       = HMAC-SHA256(SaltedPassword, "Server Key")
+
+AuthMessage     = client-first-bare + "," + server-first + "," + client-final-without-proof
+ClientSignature = HMAC-SHA256(StoredKey, AuthMessage)
+ClientProof     = ClientKey XOR ClientSignature
+ServerSignature = HMAC-SHA256(ServerKey, AuthMessage)
+```
+
+AuthMessage parts for this capture:
+
+| Part | Value |
+|---|---|
+| client-first-bare (packet 1 minus `p=tls-server-end-point,,`) | `n=,r=W9IrGgf7LpsssNerOGIcRDsi` |
+| server-first (packet 2) | `r=W9Ir...NOy,s=fClpg1M4eimzY/nhx7yXwA==,i=4096` |
+| client-final-without-proof (packet 3 minus `,p=...`) | `c=cD10...jvBk=,r=W9Ir...NOy` |
+
+Joined with `,`. No spaces. `c=` and `s=` stay base64 text.
+
+---
+
+## Packet 2: server-first
+
+```
+r=<client nonce + server nonce>,s=<salt>,i=<iterations>
+```
+
+Server nonce appended: `ydppEs2LhXHu8Sr8JdXg9NOy`. Salt and `i` come from the stored verifier.
+
+### State after packet 2
+
+| Value | Client | Server |
+|---|---|---|
+| Password | yes | no |
+| Client nonce | yes | yes |
+| Server nonce | yes | yes |
+| Salt | yes | yes |
+| Iterations `i` | yes | yes |
+| SaltedPassword | computes | no |
+| ClientKey | computes | no |
+| StoredKey | computes | yes (stored) |
+| ServerKey | computes | yes (stored) |
+| client-first-bare | yes | yes |
+| server-first | yes | yes |
+| client-final-without-proof | builds | not yet |
+| AuthMessage | computes | not yet |
+| ClientSignature | computes | not yet |
+| ClientProof | computes | not yet |
+
+---
+
+## Packet 3: client-final
+
+```
+c=<channel binding>,r=<combined nonce>,p=<ClientProof>
+```
+
+`c=` hash is computed by the client from the server certificate it received in the TLS handshake.
+
+### State after packet 3
+
+| Value | Client | Server |
+|---|---|---|
+| Password | yes | no |
+| SaltedPassword | yes | no |
+| ClientKey | yes | no |
+| StoredKey | yes | yes |
+| ServerKey | yes | yes |
+| AuthMessage | yes | builds now |
+| ClientSignature | yes | computes now |
+| ClientProof | sent | received |
+| Recovered ClientKey' | no | computes now |
+
+### Server verification
+
+```
+AuthMessage     = client-first-bare , server-first , client-final-without-proof
+ClientSignature = HMAC(StoredKey, AuthMessage)
+ClientKey'      = ClientProof XOR ClientSignature
+check           : SHA256(ClientKey') == StoredKey
+check           : c= hash == SHA256(own certificate)
+check           : r= == combined nonce sent in packet 2
+```
+
+| Result | Outcome |
+|---|---|
+| all equal | continue to packet 4 |
+| mismatch | `FATAL: password authentication failed for user "..."` |
+
+---
+
+## Packet 4: server-final
+
+```
+v=<ServerSignature>
+ServerSignature = HMAC(ServerKey, AuthMessage)
+```
+
+Followed in the same frame by `R` AuthenticationOk, 14x `S`, `K` (PID + cancel key), `Z` (ReadyForQuery, status `I`).
+
+### Client verification
+
+```
+expected = HMAC(ServerKey, AuthMessage)
+check    : expected == v=
+```
+
+| Result | Outcome |
+|---|---|
+| equal | login completes |
+| mismatch | connection aborted, no query sent |
+
+---
+
+## Errors psql prints
+
+Server rejects the proof (wrong password), produced by the server:
+
+```
+psql: error: connection to server at "127.0.0.1", port 5432 failed: FATAL:  password authentication failed for user "postgres"
+```
+
+Client rejects `v=` (server could not prove it holds the verifier), observed with a test server that sent a random `v=`:
+
+```
+psql: error: connection to server at "127.0.0.1", port 5433 failed: incorrect server signature
+```
+
+| Failure point | Checked by | Error source |
+|---|---|---|
+| ClientProof (`p=`) | server | `FATAL: password authentication failed` |
+| ServerSignature (`v=`) | client (libpq) | `incorrect server signature` |
+
+---
+
+## Decode hex from Wireshark
+
+```bash
+echo -n '<hex>' | xxd -r -p; echo
+echo -n '<base64 of c= value>' | base64 -d | xxd     # 24 B text + 32 B hash
+```
+
+Use `-r -p`. Pipe binary through `xxd` to avoid terminal garbling.
