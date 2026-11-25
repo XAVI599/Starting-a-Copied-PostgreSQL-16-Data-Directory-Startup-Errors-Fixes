@@ -1,0 +1,66 @@
+
+A potential standby is listed in synchronous_standby_names but is currently not one of the N required sync standbys. It is next in line. If a sync standby disconnects, the highest-priority potential one is promoted to sync.
+
+
+postgres=# show synchronous_standby_names;
+ synchronous_standby_names 
+---------------------------
+ First 1( node177,node168)
+(1 row)
+
+postgres=# alter system set synchronous_standby_names = 'First 1 ( node177,node178)';
+ALTER SYSTEM
+postgres=# select pg_reload_conf();
+ pg_reload_conf 
+----------------
+ t
+(1 row)
+
+
+
+postgres=# select *  from pg_stat_replication \gx
+-[ RECORD 1 ]----+---------------------------------
+pid              | 5890
+usesysid         | 10
+usename          | postgres
+application_name | node177
+client_addr      | 192.168.1.177
+client_hostname  | node177_vm
+client_port      | 46258
+backend_start    | 2026-11-25 12:05:47.429227+05:30
+backend_xmin     | 
+state            | streaming
+sent_lsn         | 2/D600F698
+write_lsn        | 2/D600F698
+flush_lsn        | 2/D600F698
+replay_lsn       | 2/D600F698
+write_lag        | 
+flush_lag        | 
+replay_lag       | 
+sync_priority    | 1
+sync_state       | sync
+reply_time       | 2026-11-25 12:19:14.45663+05:30
+-[ RECORD 2 ]----+---------------------------------
+pid              | 5891
+usesysid         | 10
+usename          | postgres
+application_name | node178
+client_addr      | 192.168.1.178
+client_hostname  | node178_vm
+client_port      | 59686
+backend_start    | 2026-11-25 12:05:47.430361+05:30
+backend_xmin     | 
+state            | streaming
+sent_lsn         | 2/D600F698
+write_lsn        | 2/D600F698
+flush_lsn        | 2/D600F698
+replay_lsn       | 2/D600F698
+write_lag        | 
+flush_lag        | 
+replay_lag       | 
+sync_priority    | 2
+sync_state       | potential
+reply_time       | 2026-11-25 12:19:08.923022+05:30
+
+
+
