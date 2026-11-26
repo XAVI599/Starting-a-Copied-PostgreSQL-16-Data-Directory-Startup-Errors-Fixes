@@ -1,0 +1,203 @@
+ ┌────────┐   TCP :6432    ┌───────────┐   TCP :5432    ┌────────────┐
+ │ Client │ ─────────────► │ PgBouncer │ ─────────────► │ PostgreSQL │
+ │ (psql) │ ◄───────────── │  (pooler) │ ◄───────────── │  (server)  │
+ └────────┘                └───────────┘                └────────────┘
+   many short-lived          keeps a small pool of         limited number of
+   client connections        reusable server connections   expensive backends
+
+
+PgBouncer SCRAM-SHA-256 AUTH FLOW (the 4 auth packets)
+=======================================================
+ 
+SETUP USED
+----------
+Start PgBouncer with the TLS key logger preloaded:
+ 
+  sudo -u pgbouncer env LD_PRELOAD=/home/hpuser/sslkeylog.so \
+       SSLKEYLOGFILE=/var/tmp/keys/pgbouncer \
+       pgbouncer -q /etc/pgbouncer/pgbouncer.ini
+ 
+Connect with TLS disabled on the client side:
+ 
+  PGSSLMODE=disable psql -h 127.0.0.1 -p 6432 -U postgres -d postgres
+ 
+Because the client leg uses sslmode=disable, the traffic between psql and
+PgBouncer (port 6432) is plain text. The 4 auth packets can be read directly in
+Wireshark with the "pgsql" display filter and no key file. The SSLKEYLOGFILE
+is only needed to decrypt the PgBouncer -> PostgreSQL leg if that leg uses TLS.
+ 
+(Note: the config file is pgbouncer.ini. Your command had pgbouncer.cgf.)
+ 
+ 
+THE PLAYERS
+-----------
+  psql        the client. Knows the password.
+  PgBouncer   verifies the client, then logs in to PostgreSQL on its behalf.
+  PostgreSQL  holds the SCRAM secret for the role in pg_authid / pg_shadow.
+ 
+The stored SCRAM secret looks like this:
+ 
+  SCRAM-SHA-256$4096:<salt>$<StoredKey>:<ServerKey>
+ 
+  4096        iteration count
+  salt        random salt chosen when the password was set
+  StoredKey   SHA256(ClientKey)
+  ServerKey   HMAC(SaltedPassword, "Server Key")
+ 
+The password itself is never stored, and neither is ClientKey.
+PgBouncer gets this same secret from userlist.txt or from auth_query
+(which reads pg_shadow).
+ 
+ 
+KEY DEFINITIONS
+---------------
+  SaltedPassword  = PBKDF2-HMAC-SHA256(password, salt, iterations)
+  ClientKey       = HMAC(SaltedPassword, "Client Key")
+  StoredKey       = SHA256(ClientKey)
+  ServerKey       = HMAC(SaltedPassword, "Server Key")
+ 
+  AuthMessage     = client-first-bare + "," + server-first + ","
+                    + client-final-without-proof
+ 
+  ClientSignature = HMAC(StoredKey, AuthMessage)
+  ClientProof     = ClientKey XOR ClientSignature
+  ServerSignature = HMAC(ServerKey, AuthMessage)
+ 
+ 
+STARTUP
+-------
+psql  -->  PgBouncer : StartupMessage (user, database, application_name, ...)
+PgBouncer -->  psql  : AuthenticationSASL
+                       (type 'R', code 10, mechanism list: SCRAM-SHA-256)
+ 
+ 
+PHASE 1: psql <-> PgBouncer (the 4 auth packets)
+------------------------------------------------
+ 
+PACKET 1  psql -> PgBouncer   SASLInitialResponse  (client-first-message)
+  Content:   n,,n=,r=<client-nonce>
+  Meaning:   psql picks SCRAM-SHA-256 and sends a random nonce.
+             The username field is empty because the user is already known
+             from the StartupMessage.
+ 
+PACKET 2  PgBouncer -> psql   AuthenticationSASLContinue  (server-first-message)
+  Content:   r=<client-nonce><server-nonce>,s=<salt>,i=4096
+  Meaning:   PgBouncer looks up the user's secret and returns the salt and
+             iteration count from it. It appends its own nonce.
+             PgBouncer uses the salt and iteration count of the real
+             PostgreSQL secret, which matters in Phase 2.
+ 
+PACKET 3  psql -> PgBouncer   SASLResponse  (client-final-message)
+  Content:   c=biws,r=<combined-nonce>,p=<ClientProof>
+  Meaning:   psql derives SaltedPassword from the password, salt and
+             iterations, computes ClientKey and StoredKey, then builds
+             AuthMessage and ClientProof = ClientKey XOR ClientSignature.
+             The password and ClientKey are never sent. Only the proof is.
+ 
+PACKET 4  PgBouncer -> psql   AuthenticationSASLFinal  (server-final-message)
+  Content:   v=<ServerSignature>
+  Meaning:   PgBouncer proves it also knows the secret. psql checks the
+             signature, so the client knows the server is genuine.
+  Followed by: AuthenticationOk (type 'R', code 0)
+ 
+ 
+HOW PGBOUNCER VERIFIES THE CLIENT (between packets 3 and 4)
+-----------------------------------------------------------
+PgBouncer has StoredKey and ServerKey from the user's secret, but not the
+password and not ClientKey. When packet 3 arrives it does this:
+ 
+  1. Builds AuthMessage from packets 1, 2 and 3 (without the proof).
+ 
+  2. ClientSignature = HMAC(StoredKey, AuthMessage)
+     It can compute this because it has StoredKey.
+ 
+  3. Recovers the key from the proof:
+       ClientKey = ClientProof XOR ClientSignature
+ 
+  4. Checks:  SHA256(ClientKey) == StoredKey
+       match     -> the client knew the password. Authentication succeeds.
+       mismatch  -> wrong password. Connection rejected.
+ 
+  5. Builds the reply for packet 4:
+       ServerSignature = HMAC(ServerKey, AuthMessage)
+     ServerKey is what lets PgBouncer prove itself to the client.
+ 
+Result: StoredKey checks the client, ServerKey proves the server, and the
+ClientKey that falls out of step 3 is the useful by-product.
+ 
+ 
+PHASE 2: PgBouncer <-> PostgreSQL (SCRAM passthrough)
+-----------------------------------------------------
+PgBouncer now needs a server connection from its pool. PostgreSQL will also
+ask for SCRAM, and PgBouncer does not know the password. It uses the
+ClientKey it recovered in step 3 above.
+ 
+PgBouncer repeats the same 4 packets as the client side of the exchange:
+ 
+  PgBouncer -> PostgreSQL : client-first  (n,,n=,r=<pgbouncer-nonce>)
+  PostgreSQL -> PgBouncer : server-first  (r=...,s=<salt>,i=4096)
+  PgBouncer -> PostgreSQL : client-final  (c=biws,r=...,p=<ClientProof>)
+  PostgreSQL -> PgBouncer : server-final  (v=<ServerSignature>)
+ 
+To build its ClientProof, PgBouncer computes:
+ 
+  ClientSignature = HMAC(StoredKey, AuthMessage')
+  ClientProof     = ClientKey XOR ClientSignature
+ 
+  ClientKey   the one recovered from the psql client in Phase 1
+  StoredKey   from the stored secret (userlist.txt or auth_query)
+  AuthMessage' built from this new exchange, with PostgreSQL's nonce and salt
+ 
+PgBouncer then checks PostgreSQL's ServerSignature with the ServerKey from
+the stored secret. If it matches, the server is genuine.
+ 
+PostgreSQL checks the proof exactly the way PgBouncer did in Phase 1:
+  ClientKey' = ClientProof XOR HMAC(StoredKey, AuthMessage')
+  SHA256(ClientKey') == StoredKey  -> accepted.
+ 
+This works because the secret in PgBouncer matches the one in PostgreSQL
+(same salt, same iterations, same StoredKey and ServerKey). It is also why
+PgBouncer can log in to the database without a plaintext password.
+ 
+ 
+COMPLETING THE CONNECTION
+-------------------------
+  PostgreSQL -> PgBouncer : AuthenticationOk, ParameterStatus..., BackendKeyData,
+                            ReadyForQuery
+  PgBouncer  -> psql      : AuthenticationOk, ParameterStatus..., BackendKeyData,
+                            ReadyForQuery
+ 
+From here, queries from psql are forwarded over the pooled server connection.
+When the session or transaction ends (depending on pool_mode), the server
+connection goes back to the pool and is reused.
+ 
+ 
+LIMITS TO REMEMBER
+------------------
+  - The passthrough only works when PgBouncer has a SCRAM secret for the
+    user that matches PostgreSQL's. If PgBouncer instead has a plaintext
+    password or an md5 hash in userlist.txt, it cannot rebuild a SCRAM proof
+    from a ClientKey and uses a different path.
+  - The recovered ClientKey is kept in memory by PgBouncer for reuse on later
+    server logins for that user. It is never written to the logs.
+  - If the password changes in PostgreSQL, the salt or iteration count changes
+    too, and PgBouncer's copy of the secret must be updated or server logins
+    will fail.
+ 
+ 
+WHAT YOU SEE IN WIRESHARK
+-------------------------
+Filter on port 6432 and decode as PostgreSQL. The order of messages is:
+ 
+  StartupMessage
+  Authentication request: SASL                 (R, code 10)
+  SASLInitialResponse                          (p)   packet 1
+  Authentication: SASL Continue                (R, code 11)  packet 2
+  SASLResponse                                 (p)   packet 3
+  Authentication: SASL Final                   (R, code 12)  packet 4
+  Authentication request: OK                   (R, code 0)
+  ParameterStatus ..., ReadyForQuery
+ 
+The packets between PgBouncer and PostgreSQL on port 5432 show the same
+sequence again for Phase 2.
+ 
