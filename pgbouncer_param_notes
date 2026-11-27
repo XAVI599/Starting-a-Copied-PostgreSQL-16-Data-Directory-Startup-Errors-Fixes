@@ -1,0 +1,155 @@
+PGBOUNCER PARAMETERS EXPLAINED: CLIENT SIDE AND SERVER SIDE
+============================================================
+Tested on PgBouncer 1.26.1 with PostgreSQL 16.15 (Ubuntu 24.04)
+ 
+MENTAL MODEL
+------------
+  app --[client connections]--> PgBouncer --[server connections]--> Postgres
+ 
+  Client connection : app/psql -> PgBouncer. Cheap (a socket and a small buffer).
+  Server connection : PgBouncer -> Postgres. Expensive (a Postgres backend process,
+                      uses one slot of Postgres max_connections).
+ 
+  Many clients share a few server connections. That is the whole point of pooling.
+  A value of 0 means "unlimited" for the max_* settings.
+ 
+ 
+====================================================================
+PART 1: CLIENT SIDE PARAMETERS (apps -> PgBouncer)
+====================================================================
+ 
+These limit how many clients can be connected to PgBouncer.
+They protect PgBouncer itself (file descriptors, memory), NOT Postgres.
+Client connections do not use Postgres connection slots.
+ 
+When a client-side limit is hit, the new client is REFUSED at login.
+It does not queue. Apps should handle the error with retry/backoff.
+ 
+Both idle and active client connections count toward these limits.
+ 
+1. max_client_conn
+   Scope   : global (all databases, all users, including admin console sessions)
+   Default : 100
+   Meaning : Maximum number of client connections PgBouncer accepts in total.
+   Error   : FATAL: no more connections allowed (max_client_conn)
+   Notes   : If apps fill this limit, you can be locked out of the admin
+             console too. Keep it below the OS file descriptor limit (ulimit -n).
+             Rough need: max_client_conn + (pool_size x number of pools).
+ 
+2. max_db_client_connections
+   Scope   : per database (all users of that database)
+   Default : 0 (unlimited)
+   Meaning : Max clients connected to one database. A per-database slice of
+             max_client_conn.
+   Example : max_client_conn=500, max_db_client_connections=300.
+             "shop" can have at most 300 clients even if the global limit is 500.
+   Notes   : Only useful with several databases, to stop one from taking all
+             the client slots.
+ 
+3. max_user_client_connections
+   Scope   : per user, across ALL databases (not per db+user pair)
+   Default : 0 (unlimited)
+   Meaning : Max clients a single user can have open to PgBouncer.
+   Error   : FATAL: client connections exceeded (max_user_client_connections)
+   Example : limit=20. alice has 12 clients on shop and 8 on analytics.
+             She is at 20, and her next client is refused on either database.
+   Notes   : Counts connections, not "active" ones. 5 idle sessions still count.
+             It does not limit how many distinct users are connected.
+             Good as a safety net so a leaky app cannot eat all client slots.
+ 
+ 
+====================================================================
+PART 2: SERVER SIDE PARAMETERS (PgBouncer -> Postgres)
+====================================================================
+ 
+These limit how many real connections PgBouncer opens to Postgres.
+They protect Postgres (max_connections, memory).
+ 
+When a server-side limit is hit, extra clients stay connected and QUEUE
+inside PgBouncer until a server connection frees up. They are not refused.
+  - Postgres prints: NOTICE: No server connection available in postgres
+    backend, client being queued
+  - After query_wait_timeout (default 120s) a waiting client is dropped.
+ 
+IMPORTANT: PgBouncer has NO single global cap on server connections.
+Total server connections = sum over all databases.
+ 
+--- 2A. Pool size and caps ---
+ 
+4. default_pool_size
+   Scope   : per (database, user) pair. Each pair is its own pool.
+   Default : 20
+   Meaning : Max server connections for one user on one database.
+   Example : pool=5. alice runs 20 queries on shop: 5 run, 15 queue.
+             bob@shop has his own separate 5.
+   Worst case without other caps:
+             databases x users x default_pool_size
+             e.g. 4 x 100 x 10 = 4000 (far above Postgres max_connections)
+ 
+5. min_pool_size
+   Scope   : per (database, user) pair
+   Default : 0
+   Meaning : Keep at least this many server connections open, even when idle.
+   Example : min=3. alice goes quiet for 30 minutes. Her pool keeps 3
+             connections warm, so her next query has no connect/login delay.
+   Notes   : Only applies to pools used at least once. Idle connections still
+             use Postgres slots. Leave at 0 when slots are tight.
+ 
+6. reserve_pool_size
+   Scope   : per (database, user) pair
+   Default : 0 (disabled)
+   Meaning : Extra burst connections allowed beyond pool_size.
+   Example : pool=5, reserve=2. A spike sends 12 queries. 5 run, 7 wait.
+             After reserve_pool_timeout, up to 2 extra connections open
+             (pool grows to 7). They close again after the spike.
+   Notes   : Count it in your sizing. Do not rely on it staying under
+             max_db_connections.
+ 
+7. reserve_pool_timeout
+   Scope   : global
+   Default : 5 (seconds)
+   Meaning : How long a client must wait before the reserve pool is used.
+ 
+8. max_db_connections
+   Scope   : per database, all users combined
+   Default : 0 (unlimited)
+   Meaning : Max server connections PgBouncer opens to one database.
+   Example : pool=10, max_db_connections=12. alice and bob both hit shop.
+             Together they cannot exceed 12. If alice holds 10, bob gets 2.
+   Notes   : THE setting that protects Postgres. Applies per database, so the
+             SUM across all databases must fit under Postgres max_connections.
+ 
+9. max_user_connections
+   Scope   : per user, all databases combined
+   Default : 0 (unlimited)
+   Meaning : Max server connections for one user across all databases.
+   Example : pool=10, max_user_connections=12. alice runs a job on shop and
+             analytics. Per pool she could hold 10+10=20, but the user cap
+             stops her at 12. Extra queries queue. bob is unaffected.
+   Notes   : The only setting that adds up one user across databases.
+             Prevents a noisy user from consuming the whole budget.
+             Queueing is the normal behavior, but it only triggers when a
+             limit is reached. With 0 this user-level limit never triggers.
+
+
+====================================================================
+PART 3: QUICK COMPARISON TABLE
+====================================================================
+ 
+Setting                       Side     Scope              When limit is hit
+----------------------------  -------  -----------------  -----------------
+max_client_conn               client   global             refused at login
+max_db_client_connections     client   per database      refused at login
+max_user_client_connections   client   per user           refused at login
+default_pool_size             server   per (db, user)     client queues
+min_pool_size                 server   per (db, user)     (pre-opens only)
+reserve_pool_size             server   per (db, user)     burst after timeout
+max_db_connections            server   per database       client queues
+max_user_connections          server   per user           client queues
+
+
+
+
+
+  
+ 
